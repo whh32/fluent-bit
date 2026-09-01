@@ -1,0 +1,136 @@
+name: Build CentOS 7 binaries
+
+# Manual build of Fluent Bit for CentOS 7 (amd64 + arm64) that produces
+# just the fluent-bit binary as an uploaded artifact. Kicked off manually or
+# on pushes to this branch so the fix in this fork can be shipped without
+# touching upstream release workflows.
+
+on:
+  push:
+    branches:
+      - fix/ml-flush-drop-on-pause
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            base_image: centos:7
+            arch_suffix: x86_64
+          - arch: arm64
+            platform: linux/arm64
+            base_image: arm64v8/centos:7
+            arch_suffix: aarch64
+
+    runs-on: ubuntu-latest
+    name: build-${{ matrix.arch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU for cross-arch builds
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build fluent-bit binary in CentOS 7 container
+        run: |
+          set -euo pipefail
+
+          # Pipe the build script into the container over stdin using a
+          # quoted heredoc so nothing inside it (variables, quotes,
+          # apostrophes in comments) is re-parsed by the outer shell.
+          docker run --rm -i --platform ${{ matrix.platform }} \
+            -v "$PWD":/src -w /src \
+            -e CMAKE_VERSION=3.31.6 \
+            ${{ matrix.base_image }} bash -s <<'CONTAINER_SCRIPT'
+              set -euo pipefail
+
+              # CentOS 7 hit EOL: mirrorlist redirects to vault.centos.org,
+              # so patch the yum config before installing packages.
+              sed -i -e "s|^mirrorlist=http://mirrorlist.centos.org|#mirrorlist=http://mirrorlist.centos.org|g" /etc/yum.repos.d/CentOS-Base.repo
+              sed -i -e "s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g" /etc/yum.repos.d/CentOS-Base.repo
+
+              # EPEL for jemalloc-devel; its mirrorlist is also dead
+              # post-EOL, point it at the archive so yum can resolve
+              # packages.
+              yum -y install epel-release
+              sed -i -e "s|^mirrorlist=|#mirrorlist=|g" \
+                     -e "s|^#baseurl=http://download.fedoraproject.org/pub/epel|baseurl=https://archives.fedoraproject.org/pub/archive/epel|g" \
+                     /etc/yum.repos.d/epel*.repo
+
+              yum -y install \
+                gcc gcc-c++ make bash wget tar gzip which file \
+                openssl openssl-libs openssl-devel \
+                libyaml-devel systemd-devel libcurl-devel \
+                cyrus-sasl-lib cyrus-sasl-devel \
+                postgresql-libs postgresql-devel \
+                jemalloc-devel \
+                flex bison pkgconfig
+              yum clean all
+
+              cmake_url="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz"
+              mkdir -p /opt/cmake
+              curl -jksSL "$cmake_url" | tar -xzf - -C /opt/cmake --strip-components 1
+              export PATH="/opt/cmake/bin:$PATH"
+              cmake --version
+
+              # Fresh build tree, do not reuse cached CMake artifacts
+              # from a different host.
+              rm -rf build && mkdir build && cd build
+
+              # Match the upstream CentOS 7 release build: same FLB_*
+              # switches as packaging/distros/centos/Dockerfile, so the
+              # binary differs from an official CentOS 7 fluent-bit only
+              # by the multiline pause fix on this branch. Kafka /
+              # Unicode / Ripser stay Off because the upstream CentOS 7
+              # target also disables them (librdkafka and simdutf do not
+              # build cleanly on this toolchain). Jemalloc page-size
+              # args come straight from the upstream Dockerfile so the
+              # arm64 build stays compatible with 64K-page kernels.
+              cmake \
+                -DFLB_RELEASE=On \
+                -DFLB_JEMALLOC=On \
+                -DFLB_JEMALLOC_OPTIONS="--with-lg-page=16 --with-lg-quantum=3" \
+                -DFLB_OUT_PGSQL=On \
+                -DFLB_KAFKA=Off \
+                -DFLB_HTTP_SERVER=On \
+                -DFLB_SQLDB=On \
+                -DFLB_TRACE=On \
+                -DFLB_CHUNK_TRACE=On \
+                -DFLB_UNICODE_ENCODER=Off \
+                -DFLB_PREFER_SYSTEM_LIB_ZSTD=Off \
+                -DFLB_RIPSER=Off \
+                ..
+              make -j "$(nproc)" fluent-bit-bin
+
+              # RelWithDebInfo bakes DWARF sections into the binary
+              # (~50MB); strip them so the artifact matches the size of
+              # upstream release builds without changing runtime behavior.
+              strip --strip-unneeded bin/fluent-bit
+              file bin/fluent-bit
+              bin/fluent-bit --version || true
+          CONTAINER_SCRIPT
+
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          out=fluent-bit-v509-centos7-${{ matrix.arch_suffix }}
+          mkdir -p artifacts
+          cp build/bin/fluent-bit "artifacts/${out}"
+          chmod +x "artifacts/${out}"
+          sha256sum "artifacts/${out}" | tee "artifacts/${out}.sha256"
+          ls -la artifacts
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluent-bit-v509-centos7-${{ matrix.arch_suffix }}
+          path: artifacts/fluent-bit-v509-centos7-${{ matrix.arch_suffix }}*
+          if-no-files-found: error
+          retention-days: 14
