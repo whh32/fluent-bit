@@ -134,6 +134,9 @@ int flb_tail_pack_line_map(struct flb_time *time, char **data,
                            size_t processed_bytes);
 int flb_tail_file_pack_line(struct flb_time *time, char *data, size_t data_size,
                             struct flb_tail_file *file, size_t processed_bytes);
+
+/* Retry pending multiline records that a paused flush kept back. */
+int flb_tail_file_flush_pending_multiline(struct flb_tail_config *ctx);
 static inline off_t flb_tail_file_db_offset(struct flb_tail_file *file)
 {
     /*

@@ -547,6 +547,11 @@ static void in_tail_resume(void *data, struct flb_config *config)
 {
     struct flb_tail_config *ctx = data;
 
+    /* Retry multiline records kept during the paused window before resuming. */
+    if (ctx->ml_ctx) {
+        flb_tail_file_flush_pending_multiline(ctx);
+    }
+
     flb_input_collector_resume(ctx->coll_fd_static, ctx->ins);
     flb_input_collector_resume(ctx->coll_fd_pending, ctx->ins);
 

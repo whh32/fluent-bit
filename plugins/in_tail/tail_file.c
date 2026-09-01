@@ -564,16 +564,60 @@ static int ml_stream_buffer_append(struct flb_tail_file *file, char *buf_data, s
     return 0;
 }
 
+/* Preserve the encoder for a resume-time retry when the input is paused. */
 static int ml_stream_buffer_flush(struct flb_tail_config *ctx, struct flb_tail_file *file)
 {
-    if (file->ml_log_event_encoder->output_length > 0) {
-        flb_input_log_append(ctx->ins,
-                             file->tag_buf,
-                             file->tag_len,
-                             file->ml_log_event_encoder->output_buffer,
-                             file->ml_log_event_encoder->output_length);
+    int ret;
 
-        flb_log_event_encoder_reset(file->ml_log_event_encoder);
+    if (file->ml_log_event_encoder->output_length == 0) {
+        return 0;
+    }
+
+    if (flb_input_buf_paused(ctx->ins) == FLB_TRUE) {
+        return -1;
+    }
+
+    ret = flb_input_log_append(ctx->ins,
+                               file->tag_buf,
+                               file->tag_len,
+                               file->ml_log_event_encoder->output_buffer,
+                               file->ml_log_event_encoder->output_length);
+    if (ret != 0) {
+        /* Keep the encoder so a later flush retries the pending records. */
+        return ret;
+    }
+
+    flb_log_event_encoder_reset(file->ml_log_event_encoder);
+    return 0;
+}
+
+/*
+ * Retry ml_stream_buffer_flush() on every file so records kept while the input
+ * was paused are drained on resume. Skip files_rotated: rotated files remain
+ * on files_static/files_event via _head, and _rotate_head is only used for the
+ * rotate-wait grace period, so walking it would double-flush.
+ */
+int flb_tail_file_flush_pending_multiline(struct flb_tail_config *ctx)
+{
+    struct mk_list *head;
+    struct flb_tail_file *file;
+
+    if (ctx == NULL || ctx->ml_ctx == NULL) {
+        return 0;
+    }
+
+    mk_list_foreach(head, &ctx->files_static) {
+        file = mk_list_entry(head, struct flb_tail_file, _head);
+        if (file->ml_log_event_encoder != NULL) {
+            ml_stream_buffer_flush(ctx, file);
+        }
+    }
+
+    mk_list_foreach(head, &ctx->files_event) {
+        file = mk_list_entry(head, struct flb_tail_file, _head);
+        if (file->ml_log_event_encoder != NULL) {
+            ml_stream_buffer_flush(ctx, file);
+        }
     }
 
     return 0;
@@ -1724,6 +1768,12 @@ void flb_tail_file_remove(struct flb_tail_file *file)
     }
 
     if (file->ml_log_event_encoder != NULL) {
+        /*
+         * flb_ml_stream_id_destroy_all() above may have appended a final flush
+         * to the encoder; try to drain it (plus any records kept from an
+         * earlier paused flush) before we destroy the encoder.
+         */
+        ml_stream_buffer_flush(ctx, file);
         flb_log_event_encoder_destroy(file->ml_log_event_encoder);
     }
 
