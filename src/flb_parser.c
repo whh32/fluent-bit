@@ -1652,6 +1652,14 @@ int flb_parser_load_multiline_parser_definitions(const char *cfg, struct flb_cf 
             goto fconf_error;
         }
 
+        /* fast_path_data_prefix: 用户显式开启日期开头 fast path */
+        tmp = get_parser_key(config, cf, s, "fast_path_data_prefix");
+        if (tmp) {
+            ml_parser->fast_path_data_prefix = flb_utils_bool(tmp);
+            flb_sds_destroy(tmp);
+            tmp = NULL;
+        }
+
         /* if type is regex, process rules */
         if (type == FLB_ML_REGEX) {
             ret = multiline_load_regex_rules(ml_parser, s, config);

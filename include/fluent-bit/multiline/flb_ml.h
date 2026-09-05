@@ -202,6 +202,10 @@ struct flb_ml_parser {
     struct flb_parser *parser;                 /* parser context */
     flb_sds_t parser_name;                     /* parser name for delayed init */
 
+    /* fast path 开关: 用户显式开启 (fast_path_data_prefix on) 时置 1,
+     * 对日期开头的行短路以跳过正则匹配 */
+    int fast_path_data_prefix;
+
     /*
      * If multiline type is REGEX, it needs a set of pre-defined rules to deal
      * with messages.

@@ -352,6 +352,55 @@ int flb_ml_rule_process(struct flb_ml_parser *ml_parser,
         buf_size = size;
     }
 
+    /* fast path: 稳态下若行首 10 字节形如 YYYY-MM-DD / YYYY/MM/DD,
+     * 直接 flush 上一条并将当前行作为新记录,跳过 cont / start_state 正则匹配 */
+    if (ml_parser->fast_path_data_prefix &&
+        buf_size >= 10 &&
+        (group->rule_to_state == NULL || group->rule_to_state->start_state)) {
+
+        const unsigned char *b = (const unsigned char *) buf_data;
+        int is_date =
+            (b[0] >= '0' && b[0] <= '9') &&
+            (b[1] >= '0' && b[1] <= '9') &&
+            (b[2] >= '0' && b[2] <= '9') &&
+            (b[3] >= '0' && b[3] <= '9') &&
+            (b[4] == '-' || b[4] == '/') &&
+            (b[5] >= '0' && b[5] <= '9') &&
+            (b[6] >= '0' && b[6] <= '9') &&
+            (b[7] == '-' || b[7] == '/') &&
+            (b[8] >= '0' && b[8] <= '9') &&
+            (b[9] >= '0' && b[9] <= '9');
+
+        if (is_date) {
+            struct flb_ml_rule *sr = NULL;
+            mk_list_foreach(head, &ml_parser->regex_rules) {
+                struct flb_ml_rule *r = mk_list_entry(head, struct flb_ml_rule, _head);
+                if (r->start_state) {
+                    sr = r;
+                    break;
+                }
+            }
+            if (sr) {
+                if (flb_sds_len(group->buf) > 0) {
+                    flb_ml_flush_stream_group(ml_parser, mst, group, FLB_FALSE);
+                }
+
+                group->rule_to_state = sr;
+
+                ret = flb_ml_group_cat(group, buf_data, buf_size);
+                if (ret < 0) {
+                    return ret;
+                }
+                if (ret == FLB_MULTILINE_TRUNCATED) {
+                    return ret;
+                }
+                flb_ml_register_context(group, tm, full_map);
+                try_flushing_buffer(ml_parser, mst, group);
+                return 0;
+            }
+        }
+    }
+
     if (group->rule_to_state) {
         /* are we in a continuation ? */
         tmp_rule = group->rule_to_state;
